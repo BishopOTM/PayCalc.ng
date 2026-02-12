@@ -3,6 +3,13 @@ import { DollarSign, Download, TrendingUp, ArrowRight, Lock, Check, Calculator, 
 
 // Nigerian Tax & Deduction Calculator Engine
 const NigerianTaxCalculator = {
+  deductionRates: {
+    pension: 0.08,
+    nhf: 0.025,
+    nhia: 0.05,
+    minimumTax: 0.01
+  },
+
   // 2025 PAYE Tax Bands (Progressive)
   taxBands: [
     { min: 0, max: 300000, rate: 0.07 },
@@ -13,45 +20,65 @@ const NigerianTaxCalculator = {
     { min: 3200000, max: Infinity, rate: 0.24 }
   ],
 
+  calculateCRA(grossAnnual) {
+    const fixedRelief = 200000;
+    const variableRelief = grossAnnual * 0.21; // 20% + 1% of gross emolument
+
+    return {
+      fixedRelief,
+      variableRelief,
+      total: Math.max(fixedRelief, variableRelief)
+    };
+  },
+
+  calculateProgressiveTax(chargeableIncome) {
+    let tax = 0;
+    let remainingIncome = chargeableIncome;
+
+    for (const band of this.taxBands) {
+      if (remainingIncome <= 0) break;
+
+      const taxableInBand = band.max === Infinity
+        ? remainingIncome
+        : Math.min(remainingIncome, band.max - band.min);
+
+      tax += taxableInBand * band.rate;
+      remainingIncome -= taxableInBand;
+    }
+
+    return tax;
+  },
+
   calculateBreakdown(grossAnnual, includeNHIS = false) {
     const grossMonthly = grossAnnual / 12;
     
     // Pension: 8% of gross (employee contribution)
-    const pensionMonthly = grossMonthly * 0.08;
+    const pensionMonthly = grossMonthly * this.deductionRates.pension;
     const pensionAnnual = pensionMonthly * 12;
     
     // NHF: 2.5% of gross (if earning >= 3000/month)
-    const nhfMonthly = grossMonthly >= 3000 ? grossMonthly * 0.025 : 0;
+    const nhfMonthly = grossMonthly >= 3000 ? grossMonthly * this.deductionRates.nhf : 0;
     const nhfAnnual = nhfMonthly * 12;
     
-    // NHIS: ~5% if applicable (not universal yet, but included as option)
-    const nhisMonthly = includeNHIS ? grossMonthly * 0.05 : 0;
+    // NHIA / health insurance: configurable employee contribution option
+    const nhisMonthly = includeNHIS ? grossMonthly * this.deductionRates.nhia : 0;
     const nhisAnnual = nhisMonthly * 12;
     
-    // Taxable Income (after pension and NHF)
-    const taxableAnnual = grossAnnual - pensionAnnual - nhfAnnual;
+    // Taxable income base after statutory deductions
+    const taxableAnnual = grossAnnual - pensionAnnual - nhfAnnual - nhisAnnual;
     
-    // Consolidated Relief Allowance (CRA)
-    // Higher of: N200,000 or (N200,000 + 20% of gross)
-    const craOption1 = 200000;
-    const craOption2 = 200000 + (0.20 * grossAnnual);
-    const reliefAllowance = Math.max(craOption1, craOption2);
+    // Consolidated Relief Allowance (CRA): higher of N200,000 or 21% of gross emolument
+    const cra = this.calculateCRA(grossAnnual);
+    const reliefAllowance = cra.total;
     
-    // Calculate PAYE
+    // Calculate PAYE (progressive schedule)
     const chargeableIncome = Math.max(0, taxableAnnual - reliefAllowance);
-    let paye = 0;
-    let remainingIncome = chargeableIncome;
-    
-    for (const band of this.taxBands) {
-      if (remainingIncome <= 0) break;
-      
-      const taxableInBand = band.max === Infinity 
-        ? remainingIncome 
-        : Math.min(remainingIncome, band.max - band.min);
-      
-      paye += taxableInBand * band.rate;
-      remainingIncome -= taxableInBand;
-    }
+    const progressivePAYE = this.calculateProgressiveTax(chargeableIncome);
+
+    // Minimum tax: 1% of gross emolument when lower than computed PAYE
+    const minimumTax = grossAnnual * this.deductionRates.minimumTax;
+    const paye = Math.max(progressivePAYE, minimumTax);
+    const minimumTaxApplied = paye > progressivePAYE;
     
     const payeMonthly = paye / 12;
     
@@ -83,7 +110,14 @@ const NigerianTaxCalculator = {
         net: netAnnual,
         taxableIncome: taxableAnnual,
         reliefAllowance: reliefAllowance,
-        chargeableIncome: chargeableIncome
+        chargeableIncome: chargeableIncome,
+        progressivePAYE,
+        minimumTax,
+        minimumTaxApplied,
+        craBreakdown: {
+          fixedRelief: cra.fixedRelief,
+          variableRelief: cra.variableRelief
+        }
       }
     };
   },
@@ -151,7 +185,7 @@ const generatePDF = async (breakdown, grossAnnual, includeNHIS) => {
   ];
   
   if (includeNHIS) {
-    annualData.push(['NHIS (5%)', `₦${breakdown.annual.nhis.toLocaleString('en-NG', {minimumFractionDigits: 2})}`]);
+    annualData.push(['NHIA / Health Insurance (5%)', `₦${breakdown.annual.nhis.toLocaleString('en-NG', {minimumFractionDigits: 2})}`]);
   }
   
   annualData.push(
@@ -190,7 +224,7 @@ const generatePDF = async (breakdown, grossAnnual, includeNHIS) => {
   ];
   
   if (includeNHIS) {
-    monthlyData.push(['NHIS', `₦${breakdown.monthly.nhis.toLocaleString('en-NG', {minimumFractionDigits: 2})}`]);
+    monthlyData.push(['NHIA / Health Insurance', `₦${breakdown.monthly.nhis.toLocaleString('en-NG', {minimumFractionDigits: 2})}`]);
   }
   
   monthlyData.push(
@@ -470,9 +504,9 @@ export default function NigerianSalaryCalculator() {
                     className="w-5 h-5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
                   />
                   <label htmlFor="nhis" className="text-sm font-medium text-slate-700 cursor-pointer">
-                    Include NHIS deduction (5%)
+                    Include NHIA / Health Insurance deduction (5%)
                     <span className="block text-xs text-slate-500 font-normal">
-                      Not mandatory nationwide yet, but some employers apply it
+                      Optional employee contribution model used by some employers
                     </span>
                   </label>
                 </div>
@@ -494,7 +528,7 @@ export default function NigerianSalaryCalculator() {
                   <li>✓ National Housing Fund (2.5%)</li>
                   <li>✓ PAYE Tax (Progressive rates)</li>
                   <li>✓ Consolidated Relief Allowance</li>
-                  <li>✓ {includeNHIS ? 'NHIS contribution (5%)' : 'Optional NHIS'}</li>
+                  <li>✓ {includeNHIS ? 'NHIA / Health Insurance (5%)' : 'Optional NHIA / Health Insurance'}</li>
                 </ul>
               </div>
             </div>
@@ -550,7 +584,7 @@ export default function NigerianSalaryCalculator() {
                     
                     {includeNHIS && breakdown.monthly.nhis > 0 && (
                       <div className="flex justify-between items-center py-2">
-                        <span className="text-slate-600 text-sm">NHIS (5%)</span>
+                        <span className="text-slate-600 text-sm">NHIA / Health Insurance (5%)</span>
                         <span className="font-semibold text-red-600 mono">-₦{breakdown.monthly.nhis.toLocaleString('en-NG', {minimumFractionDigits: 2})}</span>
                       </div>
                     )}
@@ -569,7 +603,7 @@ export default function NigerianSalaryCalculator() {
                   {/* Effective Tax Rate */}
                   <div className="mt-6 p-4 bg-blue-50 rounded-xl border border-blue-200">
                     <div className="flex justify-between items-center">
-                      <span className="text-sm font-semibold text-blue-900">Effective Tax Rate</span>
+                      <span className="text-sm font-semibold text-blue-900">Effective Statutory Deduction Rate</span>
                       <span className="text-lg font-bold text-blue-700 mono">
                         {((breakdown.monthly.totalDeductions / breakdown.monthly.gross) * 100).toFixed(1)}%
                       </span>
@@ -644,6 +678,13 @@ export default function NigerianSalaryCalculator() {
                       <span className="text-slate-600">Less: NHF (2.5%)</span>
                       <span className="font-semibold text-red-600 mono">-₦{breakdown.annual.nhf.toLocaleString('en-NG')}</span>
                     </div>
+
+                    {includeNHIS && (
+                      <div className="flex justify-between py-2">
+                        <span className="text-slate-600">Less: NHIA / Health Insurance (5%)</span>
+                        <span className="font-semibold text-red-600 mono">-₦{breakdown.annual.nhis.toLocaleString('en-NG')}</span>
+                      </div>
+                    )}
                     
                     <div className="flex justify-between py-2 border-t border-slate-200 font-semibold">
                       <span className="text-slate-700">Taxable Income</span>
@@ -651,7 +692,7 @@ export default function NigerianSalaryCalculator() {
                     </div>
                     
                     <div className="flex justify-between py-2">
-                      <span className="text-slate-600">Less: Tax Relief Allowance</span>
+                      <span className="text-slate-600">Less: Consolidated Relief Allowance (CRA)</span>
                       <span className="font-semibold text-green-600 mono">-₦{breakdown.annual.reliefAllowance.toLocaleString('en-NG')}</span>
                     </div>
                     
@@ -664,6 +705,11 @@ export default function NigerianSalaryCalculator() {
                       <span className="font-bold text-red-900">Annual PAYE Tax</span>
                       <span className="font-black text-red-700 mono text-lg">₦{breakdown.annual.paye.toLocaleString('en-NG')}</span>
                     </div>
+
+                    <p className="text-xs text-slate-500 mt-3">
+                      Progressive tax: ₦{breakdown.annual.progressivePAYE.toLocaleString('en-NG')} • Minimum tax (1%): ₦{breakdown.annual.minimumTax.toLocaleString('en-NG')}
+                      {breakdown.annual.minimumTaxApplied ? ' (minimum tax applied)' : ''}
+                    </p>
                   </div>
                 </div>
                 
